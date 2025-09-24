@@ -5,6 +5,10 @@ const GRID_MAX_ITEMS = 6;          // show up to 6 items
 let GRID_COLUMNS = 3;             // set 2 or 3 (3 -> 3x2, 2 -> 2x3)
 const PLACEHOLDER = "/images/placeholder.png"; // update path
 
+// ---------------------- Robust homepage mount/unmount (drop-in) ----------------------
+let _homepageMounted = false;
+let _routeListenerRegistered = false;
+
 // cache for fetched tabs: { tabKey: topicsArray }
 const topicsCache = {};
 
@@ -787,76 +791,158 @@ export default apiInitializer((api) => {
     }
   }
 
-  // // React to route changes: mount every time we are on the homepage
-  // api.onPageChange(() => {
-  //   const isHome = isHomepageRoute(api);
-  //   console.debug("LANDING-COMP: onPageChange => isHome=", isHome);
-  //   if (isHome) mountHomepage();
-  //   else unmountHomepage();
-  // });
+  
+/** ensure element is actually live & has content we expect */
+function homepageElementIsHealthy() {
+  const el = document.getElementById("homepage-main");
+  if (!el) return false;
+  if (!document.body.contains(el)) return false;
+  // if it's present but empty, treat as unhealthy so mount will recreate
+  if (!el.innerHTML || el.innerHTML.trim().length < 10) return false;
+  return true;
+}
 
-  function mountHomepage() {
-      // defensively check: if the element exists but isn't attached to the document, treat as not mounted
-      const existing = document.getElementById("homepage-main");
-      if (existing && document.body.contains(existing)) return; // already mounted and live
+function safeCreateHomepageContainer() {
+  // Try api.renderInOutlet first (may throw depending on environment)
+  try {
+    api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
+    const el = document.getElementById("homepage-main");
+    if (el) return el;
+  } catch (e) {
+    // ignore - fallback to manual
+  }
 
-      console.info("LANDING-COMP: mounting homepage component");
-      // ensure any old carousel interval is cleared before re-creating
-      if (_carouselIntervalId) { clearInterval(_carouselIntervalId); _carouselIntervalId = null; }
+  // Manual fallback: create #homepage-main only if not present or detached
+  let container = document.getElementById("homepage-main");
+  if (!container || !document.body.contains(container)) {
+    container = document.createElement("div");
+    container.id = "homepage-main";
+    // create insertion point: try common places, fallback to document.body.prepend
+    const mainOutlet = document.querySelector(".wrap, #main-outlet, .container, body");
+    (mainOutlet || document.body).insertBefore(container, (mainOutlet || document.body).firstChild);
+  }
+  return container;
+}
 
-      loadTop5();
-    }
+function mountHomepage() {
+  // Guard: only one mount at a time
+  if (_homepageMounted && homepageElementIsHealthy()) {
+    console.debug("LANDING-COMP: mountHomepage() skipped — already mounted & healthy");
+    return;
+  }
 
-    function unmountHomepage() {
-      const el = document.getElementById("homepage-main");
-      if (el) {
-        // remove the exact element we created (safer than closest wrapper heuristics)
-        el.remove();
-        console.info("LANDING-COMP: removed #homepage-main");
-      }
+  // If another mount attempt is in progress, bail conservatively
+  _homepageMounted = true;
 
-      // if renderInOutlet inserted other wrappers via api.renderInOutlet, attempt to remove those too (best-effort)
-      const possibleWrappers = document.querySelectorAll(".main-container, .section-box[data-landing-comp]");
-      possibleWrappers.forEach(w => {
-        if (!w.contains(document.getElementById("homepage-main"))) {
-          // if it's one we added earlier, remove it; keep this conservative to avoid removing unrelated nodes
-          if (w.dataset && w.dataset.lcOwned === "true") {
-            w.remove();
+  // Create container safely (will not duplicate if present and attached)
+  const container = safeCreateHomepageContainer();
+  if (!container) {
+    console.warn("LANDING-COMP: failed to create homepage container — aborting mount");
+    _homepageMounted = false;
+    return;
+  }
+
+  console.info("LANDING-COMP: mounting homepage component (robust path)");
+  // Clear stale carousel interval (safe)
+  if (_carouselIntervalId) { clearInterval(_carouselIntervalId); _carouselIntervalId = null; }
+
+  // Call your existing loadTop5() which builds DOM into #homepage-main
+  try {
+    loadTop5();
+  } catch (e) {
+    console.error("LANDING-COMP: loadTop5() threw:", e);
+    _homepageMounted = false;
+  }
+}
+
+function unmountHomepage() {
+  // Clear mount flag early so we can be remounted quickly if needed
+  _homepageMounted = false;
+
+  // Remove the exact element we created
+  const el = document.getElementById("homepage-main");
+  if (el && document.body.contains(el)) {
+    el.remove();
+    console.info("LANDING-COMP: removed #homepage-main");
+  }
+
+  // If renderInOutlet created wrappers, leave them (renderInOutlet removal can be risky).
+  // Clear carousel interval and destroy track if present
+  if (_carouselIntervalId) {
+    clearInterval(_carouselIntervalId);
+    _carouselIntervalId = null;
+  }
+  const track = document.querySelector('.carousel-track');
+  if (track && typeof track.__carouselDestroy === "function") {
+    try { track.__carouselDestroy(); } catch (e) { /* ignore */ }
+    track.__carouselDestroy = null;
+  }
+}
+
+// Register a single route change listener using the Ember Router's routeDidChange
+function ensureRouteListener() {
+  if (_routeListenerRegistered) return;
+  _routeListenerRegistered = true;
+
+  // Lookup router service — fallback to api.onPageChange if unavailable
+  try {
+    const router = api.container.lookup("service:router");
+    if (router && typeof router.on === "function") {
+      // routeDidChange fires after transition finishes (including browser back/forward)
+      router.on("routeDidChange", (transition) => {
+        // Defer to next paint to allow DOM updates to settle
+        requestAnimationFrame(() => {
+          // compute whether we're on homepage using the robust isHomepageRoute() you already have
+          const isHome = isHomepageRoute(api);
+          console.debug("LANDING-COMP: routeDidChange -> isHome=", isHome);
+          if (isHome) {
+            // If homepage element exists but looks unhealthy, force re-mount
+            if (!homepageElementIsHealthy()) {
+              // small defer so any other DOM changes settle
+              requestAnimationFrame(() => mountHomepage());
+            } else {
+              // healthy -> ensure mounted flag set
+              _homepageMounted = true;
+            }
+          } else {
+            unmountHomepage();
           }
-        }
+        });
       });
-
-      if (_carouselIntervalId) {
-        clearInterval(_carouselIntervalId);
-        _carouselIntervalId = null;
-      }
-
-      // try to clean any stored destroy on the track (if present)
-      const track = document.querySelector('.carousel-track');
-      if (track && typeof track.__carouselDestroy === "function") {
-        try { track.__carouselDestroy(); } catch (e) { /* ignore */ }
-        track.__carouselDestroy = null;
-      }
+      return;
     }
+  } catch (e) {
+    // ignore and fallback
+  }
 
-    // React to route changes: mount every time we are on the homepage
-    // Use a tiny defer to let the router settle (helps back-button timing issues)
-    api.onPageChange(() => {
-      // schedule microtask so router/currentRouteName has time to update
-      setTimeout(() => {
-        const isHome = isHomepageRoute(api);
-        console.debug("LANDING-COMP: onPageChange => isHome=", isHome);
-        if (isHome) mountHomepage();
-        else unmountHomepage();
-      }, 0);
-    });
+  // Fallback: use api.onPageChange (might be less precise), but still defer
+  api.onPageChange(() => {
+    // use a micro-delay then RAF to be robust to router timing
+    setTimeout(() => requestAnimationFrame(() => {
+      const isHome = isHomepageRoute(api);
+      console.debug("LANDING-COMP: onPageChange -> isHome=", isHome);
+      if (isHome) {
+        if (!homepageElementIsHealthy()) mountHomepage();
+        else _homepageMounted = true;
+      } else {
+        unmountHomepage();
+      }
+    }), 0);
+  });
+}
 
-    // initial check for the first load (also deferred to be consistent)
-    setTimeout(() => {
-      const initialIsHome = isHomepageRoute(api);
-      console.debug("LANDING-COMP: initialIsHome=", initialIsHome);
-      if (initialIsHome) mountHomepage();
-    }, 1000);
+// initial registration + initial check
+ensureRouteListener();
+// run an initial check on first load after a paint
+requestAnimationFrame(() => {
+  const initialIsHome = isHomepageRoute(api);
+  console.debug("LANDING-COMP: initialIsHome=", initialIsHome);
+  if (initialIsHome) {
+    // If element exists but not healthy, mount; otherwise mark mounted
+    if (!homepageElementIsHealthy()) mountHomepage();
+    else _homepageMounted = true;
+  }
+});
 
   // END
 });
