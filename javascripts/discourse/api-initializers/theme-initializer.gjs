@@ -260,16 +260,60 @@ export default apiInitializer((api) => {
         main.innerHTML = `
           <style>
             /* layout root */
+            // .main-container {
+            //   width: 100%;
+            //   max-width: 1100px;
+            //   margin: 20px auto;
+            //   padding: 0 16px;
+            //   display: grid;
+            //   grid-template-columns: 660px 300px;
+            //   gap: 20px;
+            //   box-sizing: border-box;
+            // }
+
+            /* REPLACE your .main-container block with this (no hardcoded max-width) */
             .main-container {
               width: 100%;
-              max-width: 1100px;
               margin: 20px auto;
               padding: 0 16px;
               display: grid;
-              grid-template-columns: 660px 300px;
+              /* left is flexible (can shrink), right is bounded by percentage (not hard px) */
+              grid-template-columns: minmax(0, 1fr) minmax(220px, 34%);
               gap: 20px;
               box-sizing: border-box;
+              overflow: visible;
             }
+
+            /* ensure grid children can shrink below their content if needed */
+            .main-container > * {
+              min-width: 0; /* critical for preventing grid overflow caused by long content/images */
+            }
+
+            /* make images and media fully responsive inside the grid items */
+            .main-container img {
+              max-width: 100%;
+              height: auto;
+              display: block;
+              object-fit: cover;
+            }
+
+            /* medium screens slightly tighter spacing - still no max-width used */
+            @media (max-width: 1200px) {
+              .main-container {
+                grid-template-columns: minmax(0, 1fr) minmax(200px, 40%);
+                gap: 16px;
+              }
+            }
+
+            /* collapse to single column below 900px (your previous rule) */
+            @media (max-width: 900px) {
+              .main-container {
+                grid-template-columns: 1fr;
+              }
+              .news-grid { grid-template-columns: 1fr !important; }
+              .view-all { text-align: left; }
+            }
+
 
             /* section box common */
             .section-box {
@@ -316,9 +360,9 @@ export default apiInitializer((api) => {
             }
 
             /* smaller carousel on narrow screens */
-            @media (max-width: 900px) {
-              .carousel-item img { height: 260px; }
-            }
+            // @media (max-width: 900px) {
+            //   .carousel-item img { height: 260px; }
+            // }
             @media (max-width: 480px) {
               .carousel-item img { height: 180px; }
             }
@@ -397,19 +441,19 @@ export default apiInitializer((api) => {
             .hot-threads a { display: flex; justify-content: space-between; padding: 10px 15px; color: #ccc; text-decoration: none; border-radius: 6px; }
 
             /* Responsive: collapse to single column on small screens */
-            @media (max-width: 900px) {
-              .main-container {
-                grid-template-columns: 1fr;
-              }
-              /* stack carousel and updates first, then hot post */
-              .left-column { order: 0; }
-              .right-column { order: 1; }
-              /* make news grid single column */
-              .news-grid { grid-template-columns: 1fr !important; }
-              /* enlarge titles/hits for touch */
-              .news-tabs a { padding: 12px 10px; font-size: 0.95rem; }
-              .view-all { text-align: left; }
-            }
+            // @media (max-width: 900px) {
+            //   .main-container {
+            //     grid-template-columns: 1fr;
+            //   }
+            //   /* stack carousel and updates first, then hot post */
+            //   .left-column { order: 0; }
+            //   .right-column { order: 1; }
+            //   /* make news grid single column */
+            //   .news-grid { grid-template-columns: 1fr !important; }
+            //   /* enlarge titles/hits for touch */
+            //   .news-tabs a { padding: 12px 10px; font-size: 0.95rem; }
+            //   .view-all { text-align: left; }
+            // }
 
             /* Ultra small screens improvements */
             @media (max-width: 480px) {
