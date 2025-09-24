@@ -858,10 +858,5 @@ export default apiInitializer((api) => {
       if (initialIsHome) mountHomepage();
     }, 0);
 
-  // initial check for the first load
-  const initialIsHome = isHomepageRoute(api);
-  console.debug("LANDING-COMP: initialIsHome=", initialIsHome);
-  if (initialIsHome) mountHomepage();
-
   // END
 });
