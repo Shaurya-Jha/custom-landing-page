@@ -900,6 +900,29 @@ export default apiInitializer((api) => {
         }
       });
   }
+  
+  // home-route detection (keeps your robust checks)
+  function isHomepageRoute(api) {
+    try {
+      const router = api.container.lookup("service:router");
+      const siteSettings = api.container.lookup("service:site-settings");
+      const routeName = router?.currentRouteName || "";
+      const currentURL = router?.currentURL || window.location.pathname || "";
+      const firstTopMenu = (siteSettings?.top_menu || "").split("|")[0]?.trim() || "";
+      const pathIsRoot = window.location.pathname === "/";
+      const routeMatchesFirstTop = firstTopMenu ? routeName === `discovery.${firstTopMenu}` : false;
+      const routeStartsWithDiscovery = routeName && routeName.indexOf("discovery") === 0;
+      const hasDiscoveryDom = !!document.querySelector(".discovery-index, .listings, .navigation");
+      console.debug("LANDING-COMP: routeName=", routeName, " currentURL=", currentURL, " pathIsRoot=", pathIsRoot,
+        " firstTopMenu=", firstTopMenu, " routeMatchesFirstTop=", routeMatchesFirstTop,
+        " routeStartsWithDiscovery=", routeStartsWithDiscovery, " hasDiscoveryDom=", hasDiscoveryDom);
+      return pathIsRoot || routeMatchesFirstTop || routeStartsWithDiscovery || hasDiscoveryDom;
+    } catch (e) {
+      console.warn("LANDING-COMP: isHomepageRoute()failed:", e);
+      return window.location.pathname === "/";
+    }
+  }
+
 
   // Register a single route change listener using routeDidChange when possible
   function ensureRouteListener() {
