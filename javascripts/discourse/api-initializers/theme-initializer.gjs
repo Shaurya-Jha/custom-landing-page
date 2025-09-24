@@ -236,7 +236,8 @@ export default apiInitializer((api) => {
       }
     }
 
-    ajax("/top/monthly.json")
+    // ajax("/top/monthly.json")
+    ajax("/latest.json")
       .then((response) => {
         const topics = (response.topic_list?.topics || []).slice(0, 5);
         const topicsWithImages = topics.filter(t => !!t.image_url);
@@ -828,24 +829,18 @@ function unmountHomepage() {
 }
 
 /**
- * Try to render into one of many likely outlet selectors.
- * - Tries immediate renderInOutlet
- * - Waits up to waitMs for outlets to appear (checks many selectors)
- * - If outlet appears calls renderInOutlet and verifies the homepage is inside it
- * - If Ember still places content elsewhere, logs verbose diagnostics
- * - Falls back to manual insertion only as last resort
+ * Try rendering into a list of outlet NAMES and pick the one that results in #homepage-main
+ * being placed inside one of the desired parent selectors (e.g. #main-outlet, .wrap).
+ *
+ * - outletNames: list of outlet names to try (Ember names like "main", "application", or your theme's)
+ * - desiredParentSelectors: where you want #homepage-main to live (page outlet)
  */
-async function mountHomepageIntoOutletAggressive(waitSelectorsCsv = [
-    '[data-outlet="above-main-container"]',
-    '#above-main-container',
-    '.above-main-container',
-    '[data-outlet="main"]',
-    '#main-outlet',
-    '.wrap',
-    '.container',
-    '#ember-app'
-  ].join(","), waitMs = 3000) {
-
+async function mountHomepageTryOutletNames({
+  outletNames = ["above-main-container", "main", "application", "main-outlet", "site", "above-site-header"],
+  desiredParentSelectors = ["#main-outlet", ".wrap", ".container"],
+  perAttemptTimeout = 50
+} = {}) {
+  // guard
   if (_renderInProgress) {
     console.debug("LANDING-COMP: mount in progress — skipping new mount");
     return;
@@ -853,107 +848,120 @@ async function mountHomepageIntoOutletAggressive(waitSelectorsCsv = [
   _renderInProgress = true;
 
   // remove any previous instance
-  unmountHomepage();
+  try { 
+    const prev = document.getElementById("homepage-main");
+    if (prev && prev.parentNode) prev.remove();
+  } catch (e) { /* ignore */ }
 
-  // 1) Try immediate renderInOutlet
-  try {
-    console.debug("LANDING-COMP: attempting immediate api.renderInOutlet call");
-    console.trace && console.trace();
-    api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
-    // tiny tick for Ember to place it
-    await new Promise(r => setTimeout(r, 0));
-    const created = document.getElementById("homepage-main");
-    if (created) {
-      _homepageMounted = true;
-      _renderInProgress = false;
-      console.info("LANDING-COMP: renderInOutlet succeeded immediately. parent:", created.parentNode && created.parentNode.nodeName, created.parentNode);
-      return;
+  // helper: check whether homepage is inside a desired parent
+  function homepageInsideDesiredParent() {
+    const home = document.getElementById("homepage-main");
+    if (!home) return null;
+    for (const sel of desiredParentSelectors) {
+      const parent = document.querySelector(sel);
+      if (parent && parent.contains(home)) return { home, parent, matchedSelector: sel };
     }
-  } catch (e) {
-    console.debug("LANDING-COMP: immediate renderInOutlet threw:", e && e.message);
+    return null;
   }
 
-  // 2) Wait for candidate outlets to appear
-  console.debug("LANDING-COMP: waiting for outlet selectors:", waitSelectorsCsv, " timeout:", waitMs);
-  const matched = await waitForAnySelector(waitSelectorsCsv, waitMs);
-
-  if (matched && matched.el) {
-    console.debug("LANDING-COMP: detected outlet element for selector:", matched.sel, matched.el);
-    // attempt renderInOutlet now
+  // Attempt each outlet name once
+  for (const outletName of outletNames) {
     try {
-      api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
-      await new Promise(r => setTimeout(r, 0));
+      console.debug(`LANDING-COMP: trying api.renderInOutlet("${outletName}")`);
+      // remove any previous instance before attempting
+      try {
+        const existing = document.getElementById("homepage-main");
+        if (existing && existing.parentNode) existing.remove();
+      } catch (e) { /* ignore */ }
+
+      // call renderInOutlet
+      try {
+        api.renderInOutlet(outletName, <template><div id="homepage-main"></div></template>);
+      } catch (eRender) {
+        console.debug(`LANDING-COMP: renderInOutlet("${outletName}") threw:`, eRender && eRender.message);
+      }
+
+      // small tick to allow Ember to attach the node
+      await new Promise(r => setTimeout(r, perAttemptTimeout));
+
+      // check if Ember placed homepage-main
       const created = document.getElementById("homepage-main");
-      if (created && matched.el.contains(created)) {
+      if (!created) {
+        console.debug(`LANDING-COMP: renderInOutlet("${outletName}") did not create #homepage-main (or was removed)`);
+        continue;
+      }
+
+      // check if placed inside desired parent
+      const inside = homepageInsideDesiredParent();
+      if (inside) {
+        console.info(`LANDING-COMP: renderInOutlet("${outletName}") placed homepage inside desired parent (${inside.matchedSelector}).`);
         _homepageMounted = true;
         _renderInProgress = false;
-        console.info("LANDING-COMP: renderInOutlet succeeded after outlet appeared. parent:", created.parentNode && created.parentNode.nodeName, created.parentNode);
-        return;
-      } else {
-        // Ember placed it somewhere else — log full diagnostics
-        console.warn("LANDING-COMP: renderInOutlet placed homepage but NOT inside matched outlet.");
-        console.group("LANDING-COMP: diagnostics");
-        console.log("Matched outlet selector:", matched.sel);
-        console.log("Matched outlet element:", matched.el);
-        const created2 = document.getElementById("homepage-main");
-        console.log("#homepage-main present?:", !!created2, " parent:", created2 && created2.parentNode, created2 && created2.parentNode && created2.parentNode.nodeName);
-        console.trace && console.trace();
-        console.groupEnd();
-        // continue to fallback attempt
+        return { success: true, outletName, matchedSelector: inside.matchedSelector };
       }
-    } catch (e) {
-      console.debug("LANDING-COMP: renderInOutlet after wait threw:", e && e.message);
+
+      // Not in desired parent — log the parent Ember used for visibility
+      console.warn(`LANDING-COMP: renderInOutlet("${outletName}") placed homepage in unexpected parent:`, created.parentNode);
+      // remove the misplaced node before next attempt to avoid duplicates
+      try { created.remove(); } catch (e) { /* ignore */ }
+    } catch (eOuter) {
+      console.error("LANDING-COMP: error during outlet-name attempt", eOuter);
+    }
+  }
+
+  // If we reach here, none of the outletNames placed homepage into a desired parent.
+  // As a last resort create a manual container inside the first desired parent (deterministic, single insertion).
+  try {
+    // remove any leftover
+    const previous = document.getElementById("homepage-main");
+    if (previous && previous.parentNode) previous.remove();
+
+    // pick the first desired parent that exists
+    let parent = null;
+    for (const sel of desiredParentSelectors) {
+      const p = document.querySelector(sel);
+      if (p) { parent = p; break; }
+    }
+    if (!parent) parent = document.body;
+
+    const container = document.createElement("div");
+    container.id = "homepage-main";
+    // insert at top of parent but after header if possible
+    const header = parent.querySelector("header, .header");
+    if (header && header.nextSibling) header.parentNode.insertBefore(container, header.nextSibling);
+    else parent.insertBefore(container, parent.firstChild);
+
+    console.warn("LANDING-COMP: fallback manual insert of #homepage-main into", parent);
+    _homepageMounted = true;
+    _renderInProgress = false;
+    return { success: true, fallback: true, parentSelector: parent.tagName + (parent.id ? `#${parent.id}` : "") };
+  } catch (eFinal) {
+    console.error("LANDING-COMP: final fallback insert failed", eFinal);
+    _renderInProgress = false;
+    return { success: false, error: eFinal };
+  }
+}
+
+
+async function mountHomepage() {
+  if (homepageElementIsHealthy()) { _homepageMounted = true; return; }
+
+  const res = await mountHomepageTryOutletNames({
+    outletNames: ["above-main-container", "main", "application", "main-outlet"],
+    desiredParentSelectors: ["#main-outlet", ".wrap", ".container"],
+    perAttemptTimeout: 60
+  });
+
+  if (res && res.success) {
+    // populate only after container actually exists
+    if (document.getElementById("homepage-main")) {
+      try { loadTop5(); } catch (e) { console.error("loadTop5() threw", e); }
     }
   } else {
-    console.debug("LANDING-COMP: no outlet appeared within wait window");
-  }
-
-  // 3) As a last resort perform manual insertion but log heavy diagnostics
-  try {
-    if (!document.getElementById("homepage-main")) {
-      const fallbackParent = document.querySelector('.wrap') || document.querySelector('.container') || document.body;
-      const container = document.createElement("div");
-      container.id = "homepage-main";
-      // make sure it doesn't visually overlay: insert after any header if present
-      const header = document.querySelector('header, .header');
-      if (header && header.nextSibling) header.parentNode.insertBefore(container, header.nextSibling);
-      else fallbackParent.insertBefore(container, fallbackParent.firstChild);
-      console.warn("LANDING-COMP: fallback manual insert of #homepage-main into", fallbackParent);
-    } else {
-      console.warn("LANDING-COMP: homepage-main already exists during fallback");
-    }
-    _homepageMounted = true;
-  } catch (e) {
-    console.error("LANDING-COMP: fallback insert failed", e);
-  } finally {
-    _renderInProgress = false;
+    console.error("LANDING-COMP: mountHomepage failed to bind to an outlet", res);
   }
 }
 
-/** Public mount wrapper: ensures we populate container after it exists */
-function mountHomepage() {
-  // if healthy, skip
-  if (homepageElementIsHealthy()) {
-    _homepageMounted = true;
-    return;
-  }
-
-  // call the aggressive outlet-aware mount (waits up to 3s)
-  mountHomepageIntoOutletAggressive(undefined, 3000)
-    .then(() => {
-      // populate after the container exists
-      try {
-        const el = document.getElementById("homepage-main");
-        if (el) {
-          loadTop5();
-        } else {
-          console.warn("LANDING-COMP: homepage-main missing after aggressive mount; aborting loadTop5");
-        }
-      } catch (e) {
-        console.error("LANDING-COMP: loadTop5 threw after aggressive mount", e);
-      }
-    });
-}
 
 /** ensure a single route listener and call mount/unmount accordingly */
 function ensureRouteListener() {
