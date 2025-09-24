@@ -3,11 +3,23 @@ import { ajax } from "discourse/lib/ajax";
 
 const GRID_MAX_ITEMS = 6;          // show up to 6 items
 let GRID_COLUMNS = 3;             // set 2 or 3 (3 -> 3x2, 2 -> 2x3)
-const PLACEHOLDER = "/images/placeholder.png"; // update path
 
-// ---------------------- Robust homepage mount/unmount (drop-in) ----------------------
-let _homepageMounted = false;
-let _routeListenerRegistered = false;
+// --- URL normalization helper (upgrade http -> https / make relative absolute) ---
+function normalizeUrl(url) {
+  if (!url || typeof url !== "string") return url;
+  const s = url.trim();
+  // keep data: and blob: URIs as-is
+  if (/^(data:|blob:)/i.test(s)) return s;
+  // already protocol-relative or https
+  if (/^\/\/|^https:\/\//i.test(s)) return s;
+  if (/^http:\/\//i.test(s)) return s.replace(/^http:/i, "https:");
+  // relative path -> make absolute against current origin
+  if (s.indexOf("/") === 0) return `${window.location.origin}${s}`;
+  return s;
+}
+
+const PLACEHOLDER = "/images/placeholder.png"; // update path
+const NORMALIZED_PLACEHOLDER = normalizeUrl(PLACEHOLDER);
 
 // cache for fetched tabs: { tabKey: topicsArray }
 const topicsCache = {};
@@ -149,8 +161,6 @@ function replaceShortcodesWithImages(escapedText, maps) {
     // 4) last-resort: linear search in primaryMap for an entry whose aliases include this name
     for (const canonical in primaryMap) {
       if (!primaryMap.hasOwnProperty(canonical)) continue;
-      // check alias map reverse: aliasMap[name] could have been set earlier; but try to be flexible and
-      // check if any alias maps to this canonical (aliasMap entries were built from search_aliases)
       if (aliasMap[name] === canonical && primaryMap[canonical].url) {
         return `<img class="emoji" alt=":${rawName}:" src="${primaryMap[canonical].url}" style="height:1em;vertical-align:-0.15em">`;
       }
@@ -165,50 +175,50 @@ export default apiInitializer((api) => {
   let _carouselIntervalId = null;
 
   // --- HOT THREADS ---
-    function loadHotThreads(limit = 10) {
-      // load emojis and hot topics in parallel (we still load emojis for fallback)
-      Promise.all([ loadCustomEmojisOnce(), ajax("/hot.json") ])
-        .then(([customMap, resp]) => {
-          const topics = (resp.topic_list?.topics || []).slice(0, limit);
-          const ul = document.querySelector(".hot-threads .box-content ul");
-          if (!ul) return;
-    
-          if (topics.length === 0) {
-            ul.innerHTML = `<li style="color:#aaa;padding:10px;">No hot threads right now.</li>`;
-            return;
+  function loadHotThreads(limit = 10) {
+    // load emojis and hot topics in parallel (we still load emojis for fallback)
+    Promise.all([ loadCustomEmojisOnce(), ajax("/hot.json") ])
+      .then(([customMap, resp]) => {
+        const topics = (resp.topic_list?.topics || []).slice(0, limit);
+        const ul = document.querySelector(".hot-threads .box-content ul");
+        if (!ul) return;
+
+        if (topics.length === 0) {
+          ul.innerHTML = `<li style="color:#aaa;padding:10px;">No hot threads right now.</li>`;
+          return;
+        }
+
+        ul.innerHTML = topics.map(t => {
+          // prefer unicode_title (server-rendered emoji glyphs), then fancy_title, then title
+          const unicode = t.unicode_title;
+          const raw = unicode || t.fancy_title || t.title || "";
+
+          // If we have a unicode_title, use it directly (escape for HTML but keep the emoji glyphs).
+          // If not, fall back to escaping + replacing shortcodes via emoji map.
+          let processed;
+          if (unicode) {
+            // escape (safe) — emoji characters are preserved by escapeHtml
+            processed = escapeHtml(String(unicode));
+          } else {
+            const escaped = escapeHtml(String(raw));
+            processed = replaceShortcodesWithImages(escaped, customMap);
           }
-    
-          ul.innerHTML = topics.map(t => {
-            // prefer unicode_title (server-rendered emoji glyphs), then fancy_title, then title
-            const unicode = t.unicode_title;
-            const raw = unicode || t.fancy_title || t.title || "";
-    
-            // If we have a unicode_title, use it directly (escape for HTML but keep the emoji glyphs).
-            // If not, fall back to escaping + replacing shortcodes via emoji map.
-            let processed;
-            if (unicode) {
-              // escape (safe) — emoji characters are preserved by escapeHtml
-              processed = escapeHtml(String(unicode));
-            } else {
-              const escaped = escapeHtml(String(raw));
-              processed = replaceShortcodesWithImages(escaped, customMap);
-            }
-    
-            const url = t.slug ? `/t/${t.slug}/${t.id}` : (t.url || (`/t/${t.id}`));
-            return `
-              <li>
-                <a href="${url}">
-                  <span>${processed}</span>
-                  <span>►</span>
-                </a>
-              </li>
-            `;
-          }).join("");
-        })
-        .catch((err) => {
-          console.error("[hot-threads] fetch failed", err);
-        });
-    }
+
+          const url = t.slug ? `/t/${t.slug}/${t.id}` : (t.url || (`/t/${t.id}`));
+          return `
+            <li>
+              <a href="${url}">
+                <span>${processed}</span>
+                <span>►</span>
+              </a>
+            </li>
+          `;
+        }).join("");
+      })
+      .catch((err) => {
+        console.error("[hot-threads] fetch failed", err);
+      });
+  }
 
 
   // --- TOP 5 / CAROUSEL (unchanged above this point) ---
@@ -226,8 +236,7 @@ export default apiInitializer((api) => {
       }
     }
 
-    // ajax("/top/monthly.json")
-    ajax("/latest.json")
+    ajax("/top/monthly.json")
       .then((response) => {
         const topics = (response.topic_list?.topics || []).slice(0, 5);
         const topicsWithImages = topics.filter(t => !!t.image_url);
@@ -237,21 +246,15 @@ export default apiInitializer((api) => {
         const carouselItemsHtml = topicsWithImages.map(t => {
           const title = (t.title || "").replace(/"/g, "&quot;");
           const topicUrl = `/t/${t.slug || ""}/${t.id}`; // fallback: `/t/${t.id}`
+          const imgSrc = normalizeUrl(t.image_url || t.image || NORMALIZED_PLACEHOLDER);
           return `
             <div class="carousel-item" data-title="${title}" data-topic-id="${t.id}">
               <a href="${topicUrl}">
-                <img src="${t.image_url}" alt="${title}" loading="lazy">
+                <img src="${imgSrc}" alt="${title}" loading="lazy">
               </a>
             </div>
           `;
         }).join("");
-
-
-        // const carouselItemsHtml = topicsWithImages.map(t => `
-        //   <div class="carousel-item" data-title="${(t.title || "").replace(/"/g, "&quot;")}" data-topic-id="${t.id}">
-        //     <img src="${t.image_url}" alt="${(t.title || "").replace(/"/g, "&quot;")}" loading="lazy">
-        //   </div>
-        // `).join("");
 
         main.innerHTML = `
           <style>
@@ -287,12 +290,6 @@ export default apiInitializer((api) => {
             .box-content { padding: 15px; }
 
             /* Carousel */
-            // .carousel { position: relative; overflow: hidden; border-radius: 10px; }
-            // .carousel-track { display: flex; transition: transform 0.6s ease; will-change: transform; }
-            // .carousel-item { flex-shrink: 0; width: 100%; }
-            // /* use fixed visual height with object-fit so cropping is predictable on mobile */
-            // .carousel-item img { width: 100%; height: 380px; object-fit: cover; display: block; }
-            /* Carousel - fully responsive, no JS width calculations */
             .carousel { position: relative; overflow: hidden; border-radius: 10px; }
             .carousel-track {
               display: flex;
@@ -316,7 +313,6 @@ export default apiInitializer((api) => {
               object-fit: cover;
               display: block;
             }
-
 
             /* smaller carousel on narrow screens */
             @media (max-width: 900px) {
@@ -586,19 +582,21 @@ export default apiInitializer((api) => {
             if (imgTagMatch) { mediaSrc = imgTagMatch[1]; break; }
             const yt = youtubeThumbnail(c);
             if (yt) { mediaSrc = yt; break; }
-            if (isVimeo(c)) { mediaSrc = PLACEHOLDER; break; }
+            if (isVimeo(c)) { mediaSrc = NORMALIZED_PLACEHOLDER; break; }
           }
         }
 
-        if (!mediaSrc) mediaSrc = PLACEHOLDER;
-        const mediaIsVideo = /\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(mediaSrc);
+        if (!mediaSrc) mediaSrc = NORMALIZED_PLACEHOLDER;
+        else mediaSrc = normalizeUrl(mediaSrc);
+
+        const mediaIsVideo = isVideoFile(mediaSrc);
         const playOverlay = mediaIsVideo ? `<div class="play-overlay" aria-hidden="true">▶</div>` : "";
         const alt = `Topic: ${t.title || "Untitled"}`;
 
         return `
           <div class="news-item">
             <a href="${url}" class="thumb" aria-label="${alt}">
-              <img loading="lazy" src="${mediaSrc}" alt="${alt}" onerror="this.onerror=null;this.src='${PLACEHOLDER}';">
+              <img loading="lazy" src="${mediaSrc}" alt="${alt}" onerror="this.onerror=null;this.src='${NORMALIZED_PLACEHOLDER}';">
               ${playOverlay}
             </a>
             <a href="${url}" class="title">${title}</a>
@@ -723,51 +721,120 @@ export default apiInitializer((api) => {
     track.__carouselDestroy = destroy;
   }
 
-  // function initCarousel() {
-  //   const track = document.querySelector('.carousel-track');
-  //   const items = Array.from(document.querySelectorAll('.carousel-item'));
-  //   const title = document.getElementById('carousel-title');
-  //   if (!track || items.length === 0) return;
-  //   track.style.width = `${items.length * 100}%`;
-  //   items.forEach(item => item.style.width = `${100 / items.length}%`);
-  //   const titles = items.map(item => item.dataset.title || "");
-  //   let currentIndex = 0;
-  //   const intervalTime = 3000;
-  //   function updateCarousel() {
-  //     const shiftPercent = (100 / items.length) * currentIndex;
-  //     track.style.transform = `translateX(-${shiftPercent}%)`;
-  //     if (title && titles.length > 0) title.textContent = titles[currentIndex] || "";
-  //   }
-  //   function nextSlide() {
-  //     currentIndex = (currentIndex + 1) % items.length;
-  //     updateCarousel();
-  //   }
-  //   updateCarousel();
-  //   // clear any previous interval
-  //   if (_carouselIntervalId) clearInterval(_carouselIntervalId);
-  //   _carouselIntervalId = setInterval(nextSlide, intervalTime);
-  // }
+  // helpers to mount/unmount safely (robust)
+  let _homepageMounted = false;
+  let _routeListenerRegistered = false;
 
-    // helpers to mount/unmount safely (patched)
-  // // helpers to mount/unmount safely
-  // function mountHomepage() {
-  //   if (document.getElementById("homepage-main")) return; // already mounted
-  //   console.info("LANDING-COMP: mounting homepage component");
-  //   loadTop5();
-  // }
+  /** ensure element is actually live & has content we expect */
+  function homepageElementIsHealthy() {
+    const el = document.getElementById("homepage-main");
+    if (!el) return false;
+    if (!document.body.contains(el)) return false;
+    if (!el.innerHTML || el.innerHTML.trim().length < 10) return false;
+    return true;
+  }
 
-  // function unmountHomepage() {
-  //   const el = document.getElementById("homepage-main");
-  //   if (el) {
-  //     const wrapper = el.closest(".section-box") || el;
-  //     wrapper.remove();
-  //     console.info("LANDING-COMP: unmounted homepage component");
-  //   }
-  //   if (_carouselIntervalId) {
-  //     clearInterval(_carouselIntervalId);
-  //     _carouselIntervalId = null;
-  //   }
-  // }
+  // safe creation: use renderInOutlet when available, but ensure container lands in desired parent
+  function safeCreateHomepageContainer() {
+    const desiredParentSelectors = [
+      "#above-main-container",
+      '[data-outlet="above-main-container"]',
+      ".wrap",
+      "#main-outlet",
+      ".container",
+      "body"
+    ];
+
+    try {
+      api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
+      const el = document.getElementById("homepage-main");
+      if (el) {
+        // debug parent location
+        // console.debug("LANDING-COMP: renderInOutlet created #homepage-main parent:", el.parentNode);
+        for (const sel of desiredParentSelectors) {
+          const parent = document.querySelector(sel);
+          if (parent && parent.contains(el)) return el;
+        }
+
+        // Move into preferred parent if found
+        const preferred = desiredParentSelectors.map(s => document.querySelector(s)).find(Boolean);
+        if (preferred) {
+          preferred.insertBefore(el, preferred.firstChild);
+          console.info("LANDING-COMP: moved #homepage-main into preferred parent:", preferred);
+          return el;
+        }
+
+        console.warn("LANDING-COMP: #homepage-main created by renderInOutlet but not inside desired parent; left in place");
+        return el;
+      }
+    } catch (e) {
+      // ignore - we'll fallback to manual insertion
+      console.debug("LANDING-COMP: api.renderInOutlet unavailable/threw:", e && e.message);
+    }
+
+    // Manual fallback create or relocate
+    let container = document.getElementById("homepage-main");
+    if (!container || !document.body.contains(container)) {
+      container = document.createElement("div");
+      container.id = "homepage-main";
+      const parent = desiredParentSelectors.map(s => document.querySelector(s)).find(Boolean) || document.body;
+      parent.insertBefore(container, parent.firstChild);
+      console.info("LANDING-COMP: manual-inserted #homepage-main into:", parent);
+    } else {
+      const parent = desiredParentSelectors.map(s => document.querySelector(s)).find(Boolean);
+      if (parent && !parent.contains(container)) {
+        parent.insertBefore(container, parent.firstChild);
+        console.info("LANDING-COMP: moved existing #homepage-main into desired parent:", parent);
+      }
+    }
+    return container;
+  }
+
+  function mountHomepage() {
+    if (_homepageMounted && homepageElementIsHealthy()) {
+      console.debug("LANDING-COMP: mountHomepage() skipped — already mounted & healthy");
+      return;
+    }
+
+    _homepageMounted = true;
+
+    const container = safeCreateHomepageContainer();
+    if (!container) {
+      console.warn("LANDING-COMP: failed to create homepage container — aborting mount");
+      _homepageMounted = false;
+      return;
+    }
+
+    console.info("LANDING-COMP: mounting homepage component (robust path)");
+    if (_carouselIntervalId) { clearInterval(_carouselIntervalId); _carouselIntervalId = null; }
+
+    try {
+      loadTop5();
+    } catch (e) {
+      console.error("LANDING-COMP: loadTop5() threw:", e);
+      _homepageMounted = false;
+    }
+  }
+
+  function unmountHomepage() {
+    _homepageMounted = false;
+
+    const el = document.getElementById("homepage-main");
+    if (el && document.body.contains(el)) {
+      el.remove();
+      console.info("LANDING-COMP: removed #homepage-main");
+    }
+
+    if (_carouselIntervalId) {
+      clearInterval(_carouselIntervalId);
+      _carouselIntervalId = null;
+    }
+    const track = document.querySelector('.carousel-track');
+    if (track && typeof track.__carouselDestroy === "function") {
+      try { track.__carouselDestroy(); } catch (e) { /* ignore */ }
+      track.__carouselDestroy = null;
+    }
+  }
 
   // home-route detection (keeps your robust checks)
   function isHomepageRoute(api) {
@@ -791,158 +858,56 @@ export default apiInitializer((api) => {
     }
   }
 
-  
-/** ensure element is actually live & has content we expect */
-function homepageElementIsHealthy() {
-  const el = document.getElementById("homepage-main");
-  if (!el) return false;
-  if (!document.body.contains(el)) return false;
-  // if it's present but empty, treat as unhealthy so mount will recreate
-  if (!el.innerHTML || el.innerHTML.trim().length < 10) return false;
-  return true;
-}
+  // Register a single route change listener using routeDidChange when possible
+  function ensureRouteListener() {
+    if (_routeListenerRegistered) return;
+    _routeListenerRegistered = true;
 
-function safeCreateHomepageContainer() {
-  // Try api.renderInOutlet first (may throw depending on environment)
-  try {
-    api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
-    const el = document.getElementById("homepage-main");
-    if (el) return el;
-  } catch (e) {
-    // ignore - fallback to manual
-  }
-
-  // Manual fallback: create #homepage-main only if not present or detached
-  let container = document.getElementById("homepage-main");
-  if (!container || !document.body.contains(container)) {
-    container = document.createElement("div");
-    container.id = "homepage-main";
-    // create insertion point: try common places, fallback to document.body.prepend
-    const mainOutlet = document.querySelector(".wrap, #main-outlet, .container, body");
-    (mainOutlet || document.body).insertBefore(container, (mainOutlet || document.body).firstChild);
-  }
-  return container;
-}
-
-function mountHomepage() {
-  // Guard: only one mount at a time
-  if (_homepageMounted && homepageElementIsHealthy()) {
-    console.debug("LANDING-COMP: mountHomepage() skipped — already mounted & healthy");
-    return;
-  }
-
-  // If another mount attempt is in progress, bail conservatively
-  _homepageMounted = true;
-
-  // Create container safely (will not duplicate if present and attached)
-  const container = safeCreateHomepageContainer();
-  if (!container) {
-    console.warn("LANDING-COMP: failed to create homepage container — aborting mount");
-    _homepageMounted = false;
-    return;
-  }
-
-  console.info("LANDING-COMP: mounting homepage component (robust path)");
-  // Clear stale carousel interval (safe)
-  if (_carouselIntervalId) { clearInterval(_carouselIntervalId); _carouselIntervalId = null; }
-
-  // Call your existing loadTop5() which builds DOM into #homepage-main
-  try {
-    loadTop5();
-  } catch (e) {
-    console.error("LANDING-COMP: loadTop5() threw:", e);
-    _homepageMounted = false;
-  }
-}
-
-function unmountHomepage() {
-  // Clear mount flag early so we can be remounted quickly if needed
-  _homepageMounted = false;
-
-  // Remove the exact element we created
-  const el = document.getElementById("homepage-main");
-  if (el && document.body.contains(el)) {
-    el.remove();
-    console.info("LANDING-COMP: removed #homepage-main");
-  }
-
-  // If renderInOutlet created wrappers, leave them (renderInOutlet removal can be risky).
-  // Clear carousel interval and destroy track if present
-  if (_carouselIntervalId) {
-    clearInterval(_carouselIntervalId);
-    _carouselIntervalId = null;
-  }
-  const track = document.querySelector('.carousel-track');
-  if (track && typeof track.__carouselDestroy === "function") {
-    try { track.__carouselDestroy(); } catch (e) { /* ignore */ }
-    track.__carouselDestroy = null;
-  }
-}
-
-// Register a single route change listener using the Ember Router's routeDidChange
-function ensureRouteListener() {
-  if (_routeListenerRegistered) return;
-  _routeListenerRegistered = true;
-
-  // Lookup router service — fallback to api.onPageChange if unavailable
-  try {
-    const router = api.container.lookup("service:router");
-    if (router && typeof router.on === "function") {
-      // routeDidChange fires after transition finishes (including browser back/forward)
-      router.on("routeDidChange", (transition) => {
-        // Defer to next paint to allow DOM updates to settle
-        requestAnimationFrame(() => {
-          // compute whether we're on homepage using the robust isHomepageRoute() you already have
-          const isHome = isHomepageRoute(api);
-          console.debug("LANDING-COMP: routeDidChange -> isHome=", isHome);
-          if (isHome) {
-            // If homepage element exists but looks unhealthy, force re-mount
-            if (!homepageElementIsHealthy()) {
-              // small defer so any other DOM changes settle
-              requestAnimationFrame(() => mountHomepage());
+    try {
+      const router = api.container.lookup("service:router");
+      if (router && typeof router.on === "function") {
+        router.on("routeDidChange", () => {
+          requestAnimationFrame(() => {
+            const isHome = isHomepageRoute(api);
+            console.debug("LANDING-COMP: routeDidChange -> isHome=", isHome);
+            if (isHome) {
+              if (!homepageElementIsHealthy()) requestAnimationFrame(() => mountHomepage());
+              else _homepageMounted = true;
             } else {
-              // healthy -> ensure mounted flag set
-              _homepageMounted = true;
+              unmountHomepage();
             }
-          } else {
-            unmountHomepage();
-          }
+          });
         });
-      });
-      return;
-    }
-  } catch (e) {
-    // ignore and fallback
-  }
-
-  // Fallback: use api.onPageChange (might be less precise), but still defer
-  api.onPageChange(() => {
-    // use a micro-delay then RAF to be robust to router timing
-    setTimeout(() => requestAnimationFrame(() => {
-      const isHome = isHomepageRoute(api);
-      console.debug("LANDING-COMP: onPageChange -> isHome=", isHome);
-      if (isHome) {
-        if (!homepageElementIsHealthy()) mountHomepage();
-        else _homepageMounted = true;
-      } else {
-        unmountHomepage();
+        return;
       }
-    }), 0);
-  });
-}
+    } catch (e) {
+      // ignore and fallback
+    }
 
-// initial registration + initial check
-ensureRouteListener();
-// run an initial check on first load after a paint
-requestAnimationFrame(() => {
-  const initialIsHome = isHomepageRoute(api);
-  console.debug("LANDING-COMP: initialIsHome=", initialIsHome);
-  if (initialIsHome) {
-    // If element exists but not healthy, mount; otherwise mark mounted
-    if (!homepageElementIsHealthy()) mountHomepage();
-    else _homepageMounted = true;
+    api.onPageChange(() => {
+      setTimeout(() => requestAnimationFrame(() => {
+        const isHome = isHomepageRoute(api);
+        console.debug("LANDING-COMP: onPageChange -> isHome=", isHome);
+        if (isHome) {
+          if (!homepageElementIsHealthy()) mountHomepage();
+          else _homepageMounted = true;
+        } else {
+          unmountHomepage();
+        }
+      }), 0);
+    });
   }
-});
+
+  // initial registration + initial check
+  ensureRouteListener();
+  requestAnimationFrame(() => {
+    const initialIsHome = isHomepageRoute(api);
+    console.debug("LANDING-COMP: initialIsHome=", initialIsHome);
+    if (initialIsHome) {
+      if (!homepageElementIsHealthy()) mountHomepage();
+      else _homepageMounted = true;
+    }
+  });
 
   // END
 });
