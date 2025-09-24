@@ -721,186 +721,6 @@ export default apiInitializer((api) => {
     track.__carouselDestroy = destroy;
   }
 
-    // helpers to mount/unmount safely (robust)
-  let _homepageMounted = false;
-  let _routeListenerRegistered = false;
-  let _renderInProgress = false;
-
-  /** ensure element is actually live & has content we expect */
-  function homepageElementIsHealthy() {
-    const el = document.getElementById("homepage-main");
-    if (!el) return false;
-    if (!document.body.contains(el)) return false;
-    if (!el.innerHTML || el.innerHTML.trim().length < 10) return false;
-    return true;
-  }
-
-  /**
-   * Wait up to `timeoutMs` for a DOM selector to exist. Resolves with element or null.
-   * Uses MutationObserver for fast response, falls back to timeout.
-   */
-  function waitForElement(selector, timeoutMs = 1000) {
-    return new Promise((resolve) => {
-      const existing = document.querySelector(selector);
-      if (existing) return resolve(existing);
-
-      let resolved = false;
-      let observer = null;
-      let tid = null;
-
-      function onFound(el) {
-        if (resolved) return;
-        resolved = true;
-        if (observer) observer.disconnect();
-        if (tid) clearTimeout(tid);
-        resolve(el);
-      }
-
-      observer = new MutationObserver(() => {
-        const el = document.querySelector(selector);
-        if (el) onFound(el);
-      });
-
-      observer.observe(document.documentElement || document.body, {
-        childList: true,
-        subtree: true,
-      });
-
-      tid = setTimeout(() => {
-        if (resolved) return;
-        resolved = true;
-        if (observer) observer.disconnect();
-        resolve(null);
-      }, timeoutMs);
-    });
-  }
-
-  /**
-   * Remove any existing homepage that may have been rendered earlier.
-   */
-  function unmountHomepage() {
-    _homepageMounted = false;
-    _renderInProgress = false;
-
-    try {
-      const el = document.getElementById("homepage-main");
-      if (el && document.body.contains(el)) {
-        el.remove();
-        console.info("LANDING-COMP: removed #homepage-main");
-      }
-    } catch (e) {
-      console.warn("LANDING-COMP: unmountHomepage error", e);
-    }
-
-    if (_carouselIntervalId) {
-      clearInterval(_carouselIntervalId);
-      _carouselIntervalId = null;
-    }
-    const track = document.querySelector('.carousel-track');
-    if (track && typeof track.__carouselDestroy === "function") {
-      try { track.__carouselDestroy(); } catch (e) { /* ignore */ }
-      track.__carouselDestroy = null;
-    }
-  }
-
-  /**
-   * Attempt to render into the named outlet. If outlet exists now, render immediately.
-   * If outlet is not present, wait for it (up to waitMs). Only fall back to manual insertion
-   * if the outlet never appears within waitMs. While waiting, do NOT insert a manual node.
-   */
-  async function mountHomepageIntoOutlet(waitSelector = '[data-outlet="above-main-container"], #above-main-container, .above-main-container', waitMs = 1000) {
-    // Avoid concurrent mounts
-    if (_renderInProgress) {
-      console.debug("LANDING-COMP: mount already in progress — skipping");
-      return;
-    }
-    _renderInProgress = true;
-
-    // Always remove previous instance before rendering new one to avoid stacking
-    unmountHomepage();
-
-    // First, try immediate renderInOutlet (best case)
-    try {
-      api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
-      // If rendered successfully, mark mounted and return
-      if (document.getElementById("homepage-main")) {
-        _homepageMounted = true;
-        _renderInProgress = false;
-        console.info("LANDING-COMP: renderInOutlet succeeded immediately");
-        return;
-      }
-    } catch (e) {
-      console.debug("LANDING-COMP: renderInOutlet immediate call threw:", e && e.message);
-    }
-
-    // Wait for a real outlet DOM node to appear
-    const outletEl = await waitForElement(waitSelector, waitMs);
-
-    if (outletEl) {
-      // Outlet appeared — now render into it (via renderInOutlet). This should cause Ember to place content inside the outlet.
-      try {
-        api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
-        // small delay for Ember to slot it in
-        await new Promise(r => setTimeout(r, 0));
-        if (document.getElementById("homepage-main") && outletEl.contains(document.getElementById("homepage-main"))) {
-          _homepageMounted = true;
-          _renderInProgress = false;
-          console.info("LANDING-COMP: renderInOutlet succeeded after waiting for outlet");
-          return;
-        } else {
-          console.warn("LANDING-COMP: renderInOutlet placed homepage but not inside the detected outlet. Falling back after wait.");
-        }
-      } catch (e) {
-        console.debug("LANDING-COMP: renderInOutlet after wait threw:", e && e.message);
-      }
-    } else {
-      console.debug(`LANDING-COMP: outlet selector "${waitSelector}" did not appear within ${waitMs}ms`);
-    }
-
-    // As a last resort, fallback to manual insertion (should be rare)
-    try {
-      if (!document.getElementById("homepage-main")) {
-        const container = document.createElement("div");
-        container.id = "homepage-main";
-        document.body.insertBefore(container, document.body.firstChild);
-        console.warn("LANDING-COMP: fallback manual insert of #homepage-main (outlet not found)");
-      }
-      _homepageMounted = true;
-    } catch (e) {
-      console.error("LANDING-COMP: fallback insert failed", e);
-    } finally {
-      _renderInProgress = false;
-    }
-  }
-
-  /**
-   * Public mount wrapper that ensures the homepage is rendered specifically into the named outlet
-   * and waits briefly if the outlet isn't present yet (no manual insertion while waiting).
-   */
-  function mountHomepage() {
-    // Avoid duplicate mounts if already healthy
-    const el = document.getElementById("homepage-main");
-    if (el && document.body.contains(el) && el.innerHTML && el.innerHTML.trim().length > 10) {
-      _homepageMounted = true;
-      return;
-    }
-
-    // kick off the outlet-aware render (wait up to 1s for outlet)
-    mountHomepageIntoOutlet('[data-outlet="above-main-container"], #above-main-container, .above-main-container, .wrap', 1000)
-      .then(() => {
-        // after the container exists in DOM, call loadTop5 to populate it
-        try {
-          if (document.getElementById("homepage-main")) {
-            loadTop5();
-          } else {
-            console.warn("LANDING-COMP: homepage-main still missing after mount; aborting loadTop5");
-          }
-        } catch (e) {
-          console.error("LANDING-COMP: loadTop5() threw after mount", e);
-        }
-      });
-  }
-  
   // home-route detection (keeps your robust checks)
   function isHomepageRoute(api) {
     try {
@@ -924,56 +744,268 @@ export default apiInitializer((api) => {
   }
 
 
-  // Register a single route change listener using routeDidChange when possible
-  function ensureRouteListener() {
-    if (_routeListenerRegistered) return;
-    _routeListenerRegistered = true;
+  // ------- STRONGER outlet-aware mount/unmount with verbose diagnostics -------
 
-    try {
-      const router = api.container.lookup("service:router");
-      if (router && typeof router.on === "function") {
-        router.on("routeDidChange", () => {
-          requestAnimationFrame(() => {
-            const isHome = isHomepageRoute(api);
-            console.debug("LANDING-COMP: routeDidChange -> isHome=", isHome);
-            if (isHome) {
-              if (!homepageElementIsHealthy()) requestAnimationFrame(() => mountHomepage());
-              else _homepageMounted = true;
-            } else {
-              unmountHomepage();
-            }
-          });
-        });
-        return;
-      }
-    } catch (e) {
-      // ignore and fallback
+let _homepageMounted = false;
+let _renderInProgress = false;
+let _routeListenerRegistered = false;
+
+/** health check for homepage-main node */
+function homepageElementIsHealthy() {
+  const el = document.getElementById("homepage-main");
+  if (!el) return false;
+  if (!document.body.contains(el)) return false;
+  if (!el.innerHTML || el.innerHTML.trim().length < 10) return false;
+  return true;
+}
+
+/**
+ * Wait up to `timeoutMs` for *any* selector from the comma-separated selector list to appear.
+ * Returns the element found and the selector that matched, or null if timeout.
+ */
+function waitForAnySelector(selectorList, timeoutMs = 3000) {
+  const selectors = String(selectorList || "").split(",").map(s => s.trim()).filter(Boolean);
+  return new Promise((resolve) => {
+    // quick check
+    for (const sel of selectors) {
+      const ex = document.querySelector(sel);
+      if (ex) return resolve({ el: ex, sel });
     }
 
-    api.onPageChange(() => {
-      setTimeout(() => requestAnimationFrame(() => {
-        const isHome = isHomepageRoute(api);
-        console.debug("LANDING-COMP: onPageChange -> isHome=", isHome);
-        if (isHome) {
-          if (!homepageElementIsHealthy()) mountHomepage();
-          else _homepageMounted = true;
-        } else {
-          unmountHomepage();
+    let resolved = false;
+    let observer = null;
+    let tid = null;
+
+    function checkAndResolve() {
+      if (resolved) return;
+      for (const sel of selectors) {
+        const ex = document.querySelector(sel);
+        if (ex) {
+          resolved = true;
+          if (observer) observer.disconnect();
+          if (tid) clearTimeout(tid);
+          return resolve({ el: ex, sel });
         }
-      }), 0);
-    });
+      }
+    }
+
+    observer = new MutationObserver(checkAndResolve);
+    observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+
+    tid = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      if (observer) observer.disconnect();
+      resolve(null);
+    }, timeoutMs);
+  });
+}
+
+/** Remove homepage and clear carousel state */
+function unmountHomepage() {
+  _homepageMounted = false;
+  _renderInProgress = false;
+
+  try {
+    const el = document.getElementById("homepage-main");
+    if (el && document.body.contains(el)) {
+      el.remove();
+      console.info("LANDING-COMP: removed #homepage-main");
+    }
+  } catch (e) {
+    console.warn("LANDING-COMP: unmountHomepage error", e);
   }
 
-  // initial registration + initial check
-  ensureRouteListener();
-  requestAnimationFrame(() => {
-    const initialIsHome = isHomepageRoute(api);
-    console.debug("LANDING-COMP: initialIsHome=", initialIsHome);
-    if (initialIsHome) {
-      if (!homepageElementIsHealthy()) mountHomepage();
-      else _homepageMounted = true;
+  if (_carouselIntervalId) {
+    clearInterval(_carouselIntervalId);
+    _carouselIntervalId = null;
+  }
+  const track = document.querySelector('.carousel-track');
+  if (track && typeof track.__carouselDestroy === "function") {
+    try { track.__carouselDestroy(); } catch (e) { /* ignore */ }
+    track.__carouselDestroy = null;
+  }
+}
+
+/**
+ * Try to render into one of many likely outlet selectors.
+ * - Tries immediate renderInOutlet
+ * - Waits up to waitMs for outlets to appear (checks many selectors)
+ * - If outlet appears calls renderInOutlet and verifies the homepage is inside it
+ * - If Ember still places content elsewhere, logs verbose diagnostics
+ * - Falls back to manual insertion only as last resort
+ */
+async function mountHomepageIntoOutletAggressive(waitSelectorsCsv = [
+    '[data-outlet="above-main-container"]',
+    '#above-main-container',
+    '.above-main-container',
+    '[data-outlet="main"]',
+    '#main-outlet',
+    '.wrap',
+    '.container',
+    '#ember-app'
+  ].join(","), waitMs = 3000) {
+
+  if (_renderInProgress) {
+    console.debug("LANDING-COMP: mount in progress — skipping new mount");
+    return;
+  }
+  _renderInProgress = true;
+
+  // remove any previous instance
+  unmountHomepage();
+
+  // 1) Try immediate renderInOutlet
+  try {
+    console.debug("LANDING-COMP: attempting immediate api.renderInOutlet call");
+    console.trace && console.trace();
+    api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
+    // tiny tick for Ember to place it
+    await new Promise(r => setTimeout(r, 0));
+    const created = document.getElementById("homepage-main");
+    if (created) {
+      _homepageMounted = true;
+      _renderInProgress = false;
+      console.info("LANDING-COMP: renderInOutlet succeeded immediately. parent:", created.parentNode && created.parentNode.nodeName, created.parentNode);
+      return;
     }
+  } catch (e) {
+    console.debug("LANDING-COMP: immediate renderInOutlet threw:", e && e.message);
+  }
+
+  // 2) Wait for candidate outlets to appear
+  console.debug("LANDING-COMP: waiting for outlet selectors:", waitSelectorsCsv, " timeout:", waitMs);
+  const matched = await waitForAnySelector(waitSelectorsCsv, waitMs);
+
+  if (matched && matched.el) {
+    console.debug("LANDING-COMP: detected outlet element for selector:", matched.sel, matched.el);
+    // attempt renderInOutlet now
+    try {
+      api.renderInOutlet("above-main-container", <template><div id="homepage-main"></div></template>);
+      await new Promise(r => setTimeout(r, 0));
+      const created = document.getElementById("homepage-main");
+      if (created && matched.el.contains(created)) {
+        _homepageMounted = true;
+        _renderInProgress = false;
+        console.info("LANDING-COMP: renderInOutlet succeeded after outlet appeared. parent:", created.parentNode && created.parentNode.nodeName, created.parentNode);
+        return;
+      } else {
+        // Ember placed it somewhere else — log full diagnostics
+        console.warn("LANDING-COMP: renderInOutlet placed homepage but NOT inside matched outlet.");
+        console.group("LANDING-COMP: diagnostics");
+        console.log("Matched outlet selector:", matched.sel);
+        console.log("Matched outlet element:", matched.el);
+        const created2 = document.getElementById("homepage-main");
+        console.log("#homepage-main present?:", !!created2, " parent:", created2 && created2.parentNode, created2 && created2.parentNode && created2.parentNode.nodeName);
+        console.trace && console.trace();
+        console.groupEnd();
+        // continue to fallback attempt
+      }
+    } catch (e) {
+      console.debug("LANDING-COMP: renderInOutlet after wait threw:", e && e.message);
+    }
+  } else {
+    console.debug("LANDING-COMP: no outlet appeared within wait window");
+  }
+
+  // 3) As a last resort perform manual insertion but log heavy diagnostics
+  try {
+    if (!document.getElementById("homepage-main")) {
+      const fallbackParent = document.querySelector('.wrap') || document.querySelector('.container') || document.body;
+      const container = document.createElement("div");
+      container.id = "homepage-main";
+      // make sure it doesn't visually overlay: insert after any header if present
+      const header = document.querySelector('header, .header');
+      if (header && header.nextSibling) header.parentNode.insertBefore(container, header.nextSibling);
+      else fallbackParent.insertBefore(container, fallbackParent.firstChild);
+      console.warn("LANDING-COMP: fallback manual insert of #homepage-main into", fallbackParent);
+    } else {
+      console.warn("LANDING-COMP: homepage-main already exists during fallback");
+    }
+    _homepageMounted = true;
+  } catch (e) {
+    console.error("LANDING-COMP: fallback insert failed", e);
+  } finally {
+    _renderInProgress = false;
+  }
+}
+
+/** Public mount wrapper: ensures we populate container after it exists */
+function mountHomepage() {
+  // if healthy, skip
+  if (homepageElementIsHealthy()) {
+    _homepageMounted = true;
+    return;
+  }
+
+  // call the aggressive outlet-aware mount (waits up to 3s)
+  mountHomepageIntoOutletAggressive(undefined, 3000)
+    .then(() => {
+      // populate after the container exists
+      try {
+        const el = document.getElementById("homepage-main");
+        if (el) {
+          loadTop5();
+        } else {
+          console.warn("LANDING-COMP: homepage-main missing after aggressive mount; aborting loadTop5");
+        }
+      } catch (e) {
+        console.error("LANDING-COMP: loadTop5 threw after aggressive mount", e);
+      }
+    });
+}
+
+/** ensure a single route listener and call mount/unmount accordingly */
+function ensureRouteListener() {
+  if (_routeListenerRegistered) return;
+  _routeListenerRegistered = true;
+
+  try {
+    const router = api.container.lookup("service:router");
+    if (router && typeof router.on === "function") {
+      router.on("routeDidChange", () => {
+        requestAnimationFrame(() => {
+          const isHome = isHomepageRoute(api);
+          console.debug("LANDING-COMP: routeDidChange -> isHome=", isHome);
+          if (isHome) {
+            if (!homepageElementIsHealthy()) requestAnimationFrame(() => mountHomepage());
+            else _homepageMounted = true;
+          } else {
+            unmountHomepage();
+          }
+        });
+      });
+      return;
+    }
+  } catch (e) {
+    // fallback to api.onPageChange below
+  }
+
+  api.onPageChange(() => {
+    setTimeout(() => requestAnimationFrame(() => {
+      const isHome = isHomepageRoute(api);
+      console.debug("LANDING-COMP: onPageChange -> isHome=", isHome);
+      if (isHome) {
+        if (!homepageElementIsHealthy()) mountHomepage();
+        else _homepageMounted = true;
+      } else {
+        unmountHomepage();
+      }
+    }), 0);
   });
+}
+
+// initial registration + initial check
+ensureRouteListener();
+requestAnimationFrame(() => {
+  const initialIsHome = isHomepageRoute(api);
+  console.debug("LANDING-COMP: initialIsHome=", initialIsHome);
+  if (initialIsHome) {
+    if (!homepageElementIsHealthy()) mountHomepage();
+    else _homepageMounted = true;
+  }
+});
+
 
 
   // END
